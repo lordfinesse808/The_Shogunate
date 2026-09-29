@@ -11,12 +11,17 @@ therefore covers all of them; tests select the report they need via
 """
 from __future__ import annotations
 
+from enum import Enum
+
 from playwright.sync_api import Page, expect
 
 from pages.base_page import BasePage
 
 
-class ReportType:
+class ReportType(str, Enum):
+    """Button labels on the Report Types rail. Subclassing `str` lets a
+    member be passed anywhere a plain string is expected."""
+
     TRANSACTION = "Transaction Report"
     PURCHASE = "Purchase Report"
     SUBSCRIPTION = "Subscription Report"
@@ -31,27 +36,26 @@ class ReportType:
 
 
 class ReportsPage(BasePage):
+    PATH = "/reports"
+
     def __init__(self, page: Page):
         super().__init__(page)
+        self.heading = page.get_by_role("heading", name="Reports")
+        self.from_date_input = page.get_by_role("textbox").nth(0)
+        self.to_date_input = page.get_by_role("textbox").nth(1)
+        self.summary_by_hotel_heading = page.get_by_role("heading", name="Summary by Hotel")
+        self.visit_site_link = page.get_by_role("link", name="Visit site")
 
     def expect_loaded(self) -> None:
-        expect(self.page.get_by_role("heading", name="Reports")).to_be_visible()
+        expect(self.heading).to_be_visible()
 
-    def select_report(self, report_type: str) -> None:
-        self.page.get_by_role("button", name=report_type, exact=True).click()
+    def select_report(self, report_type: ReportType) -> None:
+        self.page.get_by_role("button", name=report_type.value, exact=True).click()
 
-    def expect_report_heading(self, report_type: str) -> None:
-        expect(self.page.get_by_role("heading", name=report_type)).to_be_visible()
+    def expect_report_heading(self, report_type: ReportType) -> None:
+        expect(self.page.get_by_role("heading", name=report_type.value)).to_be_visible()
 
-    # ---------------------------- Date range ------------------------------- #
-    @property
-    def from_date_input(self):
-        return self.page.get_by_role("textbox").nth(0)
-
-    @property
-    def to_date_input(self):
-        return self.page.get_by_role("textbox").nth(1)
-
+    # ----------------------------- Date range -------------------------- #
     def set_from_date(self, iso_date: str) -> None:
         self.from_date_input.fill(iso_date)
 
@@ -59,16 +63,21 @@ class ReportsPage(BasePage):
         self.to_date_input.fill(iso_date)
 
     def clear_date_range(self) -> None:
-        self.page.get_by_role("button", name="Clear").click()
+        # Same "Clear" control the Filter popover uses.
+        self.clear_filter()
 
-    # ---------------------------- Totals / summary --------------------------- #
+    # --------------------------- Totals / summary ---------------------- #
     def expect_total_visible(self) -> None:
-        expect(self.page.get_by_text("total", exact=False)).to_be_visible()
+        # Several totals render on a report ("Total", "Total Amount", ...);
+        # `.first` avoids a strict-mode violation - any one proves the strip.
+        expect(self.page.get_by_text("total", exact=False).first).to_be_visible()
 
     def expect_summary_by_hotel_visible(self) -> None:
-        expect(self.page.get_by_role("heading", name="Summary by Hotel")).to_be_visible()
+        expect(self.summary_by_hotel_heading).to_be_visible()
 
-    def click_visit_site(self) -> None:
+    def click_visit_site(self) -> Page:
+        """The link opens a new tab. `context.expect_page()` must wrap the
+        click so the new Page is captured; it is returned to the caller."""
         with self.page.context.expect_page() as new_page_info:
-            self.page.get_by_role("link", name="Visit site").click()
+            self.visit_site_link.click()
         return new_page_info.value
