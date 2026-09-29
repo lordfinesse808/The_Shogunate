@@ -1,0 +1,98 @@
+Right now this repository contains only the test suite; the hotel app itself is deployed separately on Vercel. So for this project, CI/CD means two things:
+
+- **CI for the test code:** every change to the tests gets checked automatically.
+- **Continuous testing of the app:** the E2E suite runs against the deployed site automatically.
+
+GitHub Actions is the natural tool, since the code is already on GitHub. Here are the steps, in order.
+
+### 1. Get one green local run first
+Automating a suite that has never passed against the real app just gives you red builds you can't interpret. Run `pytest -m smoke --headed` locally and fix the three unverified locators listed in the README. Everything after this assumes the smoke run passes.
+
+### 2. Store the credentials as GitHub secrets
+In the repo, go to **Settings → Secrets and variables → Actions**, add `HMS_SUPER_ADMIN_EMAIL` and `HMS_SUPER_ADMIN_PASSWORD`, and add `HMS_ADMIN_BASE_URL` as a variable. Because the repo is public, GitHub never passes secrets to pull requests from forks, which is what you want.
+
+### 3. Add a workflow file with two jobs
+Save this as `.github/workflows/e2e.yml`:
+
+```yaml
+name: E2E
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * *"            # nightly regression
+  workflow_dispatch:                # "Run workflow" button
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: hotel_admin_e2e
+
+jobs:
+  static:                           # fast, no secrets, no browser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: hotel_admin_e2e/requirements.txt
+      - run: pip install -r requirements.txt ruff
+      - run: ruff check .
+      - run: pytest --collect-only -q   # catches import errors and bad markers
+
+  e2e:
+    needs: static
+    # skip PRs from forks (they get no secrets)
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      HMS_ADMIN_BASE_URL: ${{ vars.HMS_ADMIN_BASE_URL }}
+      HMS_SUPER_ADMIN_EMAIL: ${{ secrets.HMS_SUPER_ADMIN_EMAIL }}
+      HMS_SUPER_ADMIN_PASSWORD: ${{ secrets.HMS_SUPER_ADMIN_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: hotel_admin_e2e/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: playwright install --with-deps chromium
+      - run: >
+          pytest -m "${{ github.event_name == 'schedule' && 'regression' || 'smoke' }}"
+          --tracing retain-on-failure --junitxml=test-results/junit.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: hotel_admin_e2e/test-results/
+```
+
+What each part does:
+- **Static job:** runs on every PR in about 30 seconds, without needing the app.
+- **Smoke tests:** run on PRs and on pushes to `main`.
+- **Full regression:** runs every night.
+- **Destructive tests:** never run, because `pytest.ini` deselects them by default.
+- **On failure:** the screenshot, accessibility snapshot and Playwright trace are uploaded, so you can debug a failed run without rerunning it.
+
+### 4. Make the checks required before merging
+Under **Settings → Branches → Branch protection** for `main`, require the `static` and `e2e` checks to pass. After that, a broken test change can't be merged.
+
+### 5. Test the app after each deployment
+If the app's own repo is on GitHub, trigger this suite once Vercel finishes deploying. Use a `repository_dispatch` event, or `deployment_status` if the tests live in the same repo as the app. Point `HMS_ADMIN_BASE_URL` at the preview URL, so a bad deploy is caught before it's promoted. Of all these steps, this is the one that turns the suite into real CD protection.
+
+### 6. Harden it as it grows
+- **Test data:** `test_add_staff_happy_path` is a smoke test, so every PR run would create a staff record. Move it to regression, or give the suite a disposable QA environment.
+- **Pinned versions:** pin exact dependency versions (for example with `pip-tools`) so a new Playwright release can't break CI overnight.
+- **Faster login:** log in once per session using `storage_state` (exercise 5 in the learning guide). This is usually the biggest speed-up.
+- **Parallel runs:** add `pytest-xdist` only after tests stop depending on shared seed rows.
+- **Reports and alerts:** add an HTML or Allure report, and a Slack notification when the nightly run fails.
+- **Retries:** avoid blanket retries (`pytest-rerunfailures`), because they hide flaky tests instead of fixing them.
+
+I can add steps 3 and 6 to [lordfinesse808/The_Shogunate#1](https://github.com/lordfinesse808/The_Shogunate/pull/1): the workflow file, a `ruff` config, and a section in the learning guide explaining the workflow line by line. Steps 2 and 4 need you in the GitHub settings. Want me to go ahead?
